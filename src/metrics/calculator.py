@@ -18,13 +18,16 @@ class PerformanceCalculator:
         Initialize the PerformanceCalculator with user parameters.
         
         Args:
-            user_weight (float): User's weight in kg (optional)
-            barbell_weight (float): Weight of the barbell in kg
-            user_height (float): User's height in cm (optional)
+            user_weight (float): User's weight in kg (kept for display purposes only)
+            barbell_weight (float): Weight of the barbell in kg (used in calculations)
+            user_height (float): User's height in cm (kept for display purposes only)
         """
-        self.user_weight = user_weight
-        self.barbell_weight = barbell_weight
+        # These parameters are currently kept for display purposes in the UI
+        self.user_weight = user_weight  
         self.user_height = user_height
+        
+        # This parameter is used in force and power calculations
+        self.barbell_weight = barbell_weight
         self.gravity = 9.81  # m/s^2
         
         # For storing time-series data
@@ -67,6 +70,9 @@ class PerformanceCalculator:
             pose_data (Dict): Pose data from the pose estimation module
             exercise_type (str): Type of exercise being performed
         """
+        # Store the current exercise type for use in other methods
+        self.current_exercise_type = exercise_type.lower()
+        
         if not pose_data.get('joint_angles') or not pose_data.get('landmarks'):
             return
         
@@ -126,37 +132,41 @@ class PerformanceCalculator:
     
     def _update_velocity(self, current_time: float):
         """
-        Calculate velocity based on position changes.
-        Uses centered finite difference method for better accuracy.
+        Calculate velocity using central difference method with height normalization.
         
         Args:
             current_time (float): Current frame time
         """
         positions = self.position_series['bar_height']
         
-        # Need at least 3 points for centered difference
+        # Need at least 3 points for central difference
         if len(positions) < 3:
             return
         
-        # Get the latest 3 position readings
+        # Use simple central difference for robustness
         times = [p[0] for p in positions[-3:]]
         pos = [p[1] for p in positions[-3:]]
         
-        # Calculate velocity using centered finite difference
-        # v = (x_{i+1} - x_{i-1}) / (t_{i+1} - t_{i-1})
         dt = times[2] - times[0]
         
         if dt > 0:
-            velocity = (pos[0] - pos[2]) / dt  # Note: y-axis is inverted in image coords
+            velocity = (pos[0] - pos[2]) / dt  # y-axis is inverted in image coords
+            
+            # Normalize velocity based on user height if available
+            # Taller users have longer range of motion, affecting velocity measurements
+            if self.user_height > 0:
+                reference_height = 175  # cm, average height
+                height_factor = self.user_height / reference_height
+                velocity = velocity * height_factor  # Normalize by height ratio
             
             if 'bar_velocity' not in self.velocity_series:
                 self.velocity_series['bar_velocity'] = []
             
             self.velocity_series['bar_velocity'].append((current_time, velocity))
-    
+
     def _update_acceleration(self, current_time: float):
         """
-        Calculate acceleration based on velocity changes.
+        Calculate acceleration using central difference method.
         
         Args:
             current_time (float): Current frame time
@@ -166,11 +176,10 @@ class PerformanceCalculator:
         
         velocities = self.velocity_series['bar_velocity']
         
-        # Get the latest 3 velocity readings
+        # Use simple central difference for robustness
         times = [v[0] for v in velocities[-3:]]
         vels = [v[1] for v in velocities[-3:]]
         
-        # Calculate acceleration using centered finite difference
         dt = times[2] - times[0]
         
         if dt > 0:
@@ -183,7 +192,7 @@ class PerformanceCalculator:
     
     def _update_force(self, current_time: float):
         """
-        Calculate force using F = m·a.
+        Calculate force with improved biomechanical model that includes user weight.
         
         Args:
             current_time (float): Current frame time
@@ -191,26 +200,43 @@ class PerformanceCalculator:
         if 'bar_acceleration' not in self.acceleration_series or not self.acceleration_series['bar_acceleration']:
             return
         
-        # Mass is barbell weight plus a portion of user weight depending on the exercise
-        mass = self.barbell_weight  # kg
-        
-        # Get the latest acceleration
         acceleration = self.acceleration_series['bar_acceleration'][-1][1]
         
-        # Calculate force: F = ma
-        force = mass * acceleration
+        # Calculate effective mass based on exercise type
+        # Include a portion of user weight based on exercise biomechanics
+        exercise_type = getattr(self, 'current_exercise_type', 'squat').lower()
         
-        # Add the weight force (mass * g)
-        force += mass * self.gravity
+        # Movement-dependent factor for user weight contribution
+        if exercise_type == 'squat':
+            k_factor = 0.6  # ~60% of user weight contributes to squat
+        elif exercise_type == 'deadlift':
+            k_factor = 0.4  # ~40% of user weight contributes to deadlift
+        elif exercise_type == 'bench_press':
+            k_factor = 0.2  # ~20% of user weight contributes to bench press
+        else:
+            k_factor = 0.5  # Default factor
+        
+        # Calculate effective mass
+        effective_mass = self.barbell_weight
+        if self.user_weight > 0:
+            effective_mass += k_factor * self.user_weight
+        
+        # Calculate force: F = ma + mg
+        force = effective_mass * acceleration
+        weight_force = effective_mass * self.gravity
+        
+        # Total force
+        total_force = force + weight_force
         
         if 'bar_force' not in self.force_series:
             self.force_series['bar_force'] = []
         
-        self.force_series['bar_force'].append((current_time, force))
+        self.force_series['bar_force'].append((current_time, total_force))
     
     def _update_power(self, current_time: float):
         """
-        Calculate power using P = F·v.
+        Calculate power using P = F·v with improved biomechanical model.
+        Only positive power (during concentric phase) is meaningful for performance analysis.
         
         Args:
             current_time (float): Current frame time
@@ -223,82 +249,197 @@ class PerformanceCalculator:
         force = self.force_series['bar_force'][-1][1]
         velocity = self.velocity_series['bar_velocity'][-1][1]
         
-        # Calculate power: P = F·v (watts)
+        # Calculate power: P = F·v
         power = force * velocity
         
+        # Store power regardless of sign for complete analysis
         if 'bar_power' not in self.power_series:
             self.power_series['bar_power'] = []
         
         self.power_series['bar_power'].append((current_time, power))
     
+    def _adaptive_threshold_detection(self, signal, min_distance=5, adaptive_ratio=0.1):
+        """
+        Perform adaptive threshold detection with personalized parameters
+        based on user height and weight.
+        
+        Args:
+            signal: The signal to analyze
+            min_distance: Minimum distance between detections
+            adaptive_ratio: Base ratio to be adjusted by user parameters
+            
+        Returns:
+            (peaks, valleys): Indices of peaks and valleys
+        """
+        if len(signal) < 10:
+            return [], []
+        
+        # Personalize adaptive_ratio based on user height and weight
+        # Taller users tend to have slower, longer movements
+        # Heavier users may have different movement patterns
+        personalized_ratio = adaptive_ratio
+        
+        if self.user_height > 0 and self.user_weight > 0:
+            # Calculate personalized threshold using the formula:
+            # adaptive_ratio = 0.05 + 0.0003 × (height - 170) - 0.0002 × (weight - 75)
+            height_adjustment = 0.0003 * (self.user_height - 170)
+            weight_adjustment = 0.0002 * (self.user_weight - 75)
+            personalized_ratio = 0.05 + height_adjustment - weight_adjustment
+            
+            # Ensure the ratio stays within reasonable bounds
+            personalized_ratio = max(0.01, min(0.3, personalized_ratio))
+        
+        # Calculate prominence threshold with personalized ratio
+        signal_range = np.max(signal) - np.min(signal)
+        prominence_threshold = max(0.005, signal_range * personalized_ratio)
+        
+        # Adjust min_distance based on height (taller users = longer movements)
+        if self.user_height > 0:
+            height_factor = self.user_height / 175  # Relative to average height
+            min_distance = max(3, int(min_distance * height_factor))
+        
+        # Detect peaks and valleys with personalized parameters
+        peaks, _ = find_peaks(signal, 
+                            distance=min_distance,
+                            prominence=prominence_threshold,
+                            width=2)
+        
+        valleys, _ = find_peaks(-np.array(signal), 
+                              distance=min_distance,
+                              prominence=prominence_threshold,
+                              width=2)
+        
+        return peaks, valleys
+    
     def _get_rep_segments(self, angle_name: str = 'avg_knee', exercise_type: str = 'squat') -> List[Tuple[int, int]]:
         """
-        Get start and end indices for each repetition.
+        Get rep segments by analyzing velocity patterns.
         
+        Args:
+            angle_name (str): Not used, kept for backwards compatibility
+            exercise_type (str): Type of exercise being performed
+            
         Returns:
             List[Tuple[int, int]]: List of (start_idx, end_idx) for each rep
         """
-        if angle_name not in self.joint_angle_series or len(self.joint_angle_series[angle_name]) < 10:
+        if 'bar_velocity' not in self.velocity_series or len(self.velocity_series['bar_velocity']) < 10:
             return []
-        
-        angle_data = [a[1] for a in self.joint_angle_series[angle_name]]
-        
+
         try:
-            # Smooth the data
-            window_size = min(51, len(angle_data) - 2 if len(angle_data) % 2 == 0 else len(angle_data) - 1)
-            if window_size < 3:
-                window_size = 3
+            velocity_data = [v[1] for v in self.velocity_series['bar_velocity']]
+            
+            # Apply light smoothing
+            window_size = min(max(5, len(velocity_data) // 30), 9)
             if window_size % 2 == 0:
                 window_size -= 1
             
-            smoothed_data = savgol_filter(angle_data, window_size, 3)
+            smoothed_data = savgol_filter(velocity_data, window_size, 1)
             
-            # Find peaks and valleys
-            if exercise_type.lower() == 'squat':
-                valleys, _ = find_peaks(-np.array(smoothed_data))
-                peaks, _ = find_peaks(smoothed_data)
-            else:
-                peaks, _ = find_peaks(smoothed_data)
-                valleys, _ = find_peaks(-np.array(smoothed_data))
+            # Try adaptive peak detection first
+            peaks, valleys = self._adaptive_threshold_detection(smoothed_data, min_distance=3, adaptive_ratio=0.1)
             
-            # Sort all points
-            all_points = sorted(list(peaks) + list(valleys))
-            
-            # Create segments
-            segments = []
-            for i in range(len(all_points) - 1):
-                segments.append((all_points[i], all_points[i + 1]))
+            # If we can't find enough peaks and valleys, try zero-crossing detection
+            if len(peaks) < 2 or len(valleys) < 2:
+                segments = []
+                in_rep = False
+                start_idx = 0
                 
-            return segments
+                for i in range(1, len(smoothed_data)):
+                    # Detect start of rep (velocity becomes positive)
+                    if smoothed_data[i-1] <= 0 and smoothed_data[i] > 0:
+                        if not in_rep:
+                            start_idx = i
+                            in_rep = True
+                    # Detect end of rep (velocity becomes negative)
+                    elif smoothed_data[i-1] >= 0 and smoothed_data[i] < 0:
+                        if in_rep:
+                            segments.append((start_idx, i))
+                            in_rep = False
+                
+                return segments
             
+            # Use adaptive peak detection results
+            segments = []
+            valley_idx = 0
+            peak_idx = 0
+
+            while valley_idx < len(valleys) and peak_idx < len(peaks):
+                valley = valleys[valley_idx]
+                peak = peaks[peak_idx]
+
+                if peak > valley:
+                    # Validate minimum movement
+                    segment = smoothed_data[valley:peak+1]
+                    velocity_range = np.max(segment) - np.min(segment)
+                    
+                    # Lower threshold for validation
+                    if velocity_range > 0.005:
+                        segments.append((valley, peak))
+                    
+                    valley_idx += 1
+                    peak_idx += 1
+                elif peak < valley:
+                    peak_idx += 1
+                else:
+                    valley_idx += 1
+
+            return segments
+
         except Exception as e:
             print(f"Error in rep segmentation: {e}")
             return []
 
+    def count_reps(self, angle_name: str = 'avg_knee', exercise_type: str = 'squat') -> int:
+        """
+        Count repetitions by analyzing velocity patterns.
+        
+        Args:
+            exercise_type (str): Type of exercise
+            
+        Returns:
+            int: Number of completed repetitions
+        """
+        # Simply call _get_rep_segments and count the results
+        segments = self._get_rep_segments(angle_name, exercise_type)
+        return len(segments)
+
     def calculate_summary_metrics(self) -> Dict[str, Any]:
         """
-        Calculate summary statistics for the exercise session.
+        Calculate summary statistics for the exercise session with separated 
+        positive and negative velocity metrics.
         
         Returns:
             Dict[str, Any]: Dictionary with summary metrics
         """
         summary = {}
         
-        # Get rep segments
+        # Get rep count using velocity-based detection
+        summary['rep_count'] = self.count_reps()
+        
+        # Get rep segments for detailed metrics
         segments = self._get_rep_segments()
-        summary['rep_count'] = len(segments)
         
         # Calculate per-rep metrics
-        rep_velocities = []
+        rep_velocities_pos = []  # Positive velocities (concentric phase)
+        rep_velocities_neg = []  # Negative velocities (eccentric phase)
         rep_forces = []
         rep_powers = []
-        
+
         for start_idx, end_idx in segments:
-            # Velocity calculations per rep
+            # Velocity calculations per rep, separated by direction
             if 'bar_velocity' in self.velocity_series:
                 velocities = [v[1] for v in self.velocity_series['bar_velocity'][start_idx:end_idx]]
                 if velocities:
-                    rep_velocities.append(np.mean([abs(v) for v in velocities]))  # Use absolute values
+                    # Separate positive and negative velocities
+                    pos_vels = [v for v in velocities if v > 0]
+                    neg_vels = [v for v in velocities if v < 0]
+                    
+                    if pos_vels:
+                        rep_velocities_pos.append(np.mean(pos_vels))
+                    
+                    if neg_vels:
+                        # Store negative velocities as absolute values for easier comparison
+                        rep_velocities_neg.append(np.mean([abs(v) for v in neg_vels]))
                     
             # Force calculations per rep
             if 'bar_force' in self.force_series:
@@ -306,37 +447,69 @@ class PerformanceCalculator:
                 if forces:
                     rep_forces.append(np.mean([abs(f) for f in forces]))
                     
-            # Power calculations per rep
-            if 'bar_power' in self.power_series:
+            # Power calculations per rep - only for positive velocity (concentric) phases
+            if ('bar_power' in self.power_series and 'bar_velocity' in self.velocity_series):
+                # Get velocity and power values for this segment
+                velocities = [v[1] for v in self.velocity_series['bar_velocity'][start_idx:end_idx]]
                 powers = [p[1] for p in self.power_series['bar_power'][start_idx:end_idx]]
-                positive_powers = [p for p in powers if p > 0]
-                if positive_powers:
-                    rep_powers.append(np.mean(positive_powers))
+                
+                # Pair velocities with their corresponding power values
+                vel_power_pairs = list(zip(velocities, powers))
+                
+                # Only consider power during concentric phase (positive velocity)
+                concentric_powers = [p for v, p in vel_power_pairs if v > 0]
+                if concentric_powers:
+                    rep_powers.append(np.mean(concentric_powers))
+
+        # Calculate velocity metrics - separate positive and negative
+        summary['avg_velocity_pos'] = np.mean(rep_velocities_pos) if rep_velocities_pos else 0
+        summary['avg_velocity_neg'] = np.mean(rep_velocities_neg) if rep_velocities_neg else 0
         
-        # Calculate averages across reps
-        summary['avg_velocity'] = np.mean(rep_velocities) if rep_velocities else 0
+        # Calculate force and power averages
         summary['avg_force'] = np.mean(rep_forces) if rep_forces else 0
         summary['avg_power'] = np.mean(rep_powers) if rep_powers else 0
         
         # Calculate maximums from entire series
         if 'bar_velocity' in self.velocity_series and self.velocity_series['bar_velocity']:
-            summary['max_velocity'] = max(abs(v[1]) for v in self.velocity_series['bar_velocity'])
+            all_velocities = [v[1] for v in self.velocity_series['bar_velocity']]
+            pos_velocities = [v for v in all_velocities if v > 0]
+            neg_velocities = [v for v in all_velocities if v < 0]
+            
+            summary['max_velocity_pos'] = max(pos_velocities) if pos_velocities else 0
+            summary['max_velocity_neg'] = abs(min(neg_velocities)) if neg_velocities else 0
         else:
-            summary['max_velocity'] = 0
+            summary['max_velocity_pos'] = 0
+            summary['max_velocity_neg'] = 0
             
         if 'bar_force' in self.force_series and self.force_series['bar_force']:
             summary['max_force'] = max(abs(f[1]) for f in self.force_series['bar_force'])
         else:
             summary['max_force'] = 0
             
-        if 'bar_power' in self.power_series and self.power_series['bar_power']:
-            summary['max_power'] = max(p[1] for p in self.power_series['bar_power'] if p[1] > 0)
+        # For power, only consider positive values during concentric movement
+        if ('bar_power' in self.power_series and 'bar_velocity' in self.velocity_series):
+            # Pair velocity and power from their series, using common timestamps
+            vel_dict = {v[0]: v[1] for v in self.velocity_series['bar_velocity']}
+            power_dict = {p[0]: p[1] for p in self.power_series['bar_power']}
+            
+            # Find timestamps present in both series
+            common_times = set(vel_dict.keys()).intersection(set(power_dict.keys()))
+            
+            # Extract powers that correspond to positive velocity (concentric phase)
+            concentric_powers = [power_dict[t] for t in common_times if vel_dict[t] > 0]
+            
+            if concentric_powers:
+                summary['max_power'] = max(concentric_powers)
+            else:
+                summary['max_power'] = 0
         else:
             summary['max_power'] = 0
         
         # Add units
-        summary['avg_velocity_units'] = 'm/s'
-        summary['max_velocity_units'] = 'm/s'
+        summary['avg_velocity_pos_units'] = 'm/s'
+        summary['max_velocity_pos_units'] = 'm/s'
+        summary['avg_velocity_neg_units'] = 'm/s'
+        summary['max_velocity_neg_units'] = 'm/s'
         summary['avg_force_units'] = 'N'
         summary['max_force_units'] = 'N'
         summary['avg_power_units'] = 'W'
