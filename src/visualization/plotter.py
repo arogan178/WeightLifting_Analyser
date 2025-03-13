@@ -17,10 +17,26 @@ class PerformanceVisualizer:
     angles, velocity, force, and power metrics.
     """
     
-    def __init__(self):
-        """Initialize the PerformanceVisualizer"""
-        # Set up a nice style for plots
-        sns.set_theme(style="whitegrid")
+    def __init__(self, dark_mode=False):
+        """Initialize the PerformanceVisualizer
+        
+        Args:
+            dark_mode (bool): Whether to use dark theme for plots
+        """
+        # Set up style based on mode
+        self.dark_mode = dark_mode
+        if dark_mode:
+            plt.style.use('dark_background')
+            self.bg_color = '#2d2d2d'
+            self.text_color = 'white'
+            self.grid_color = '#404040'
+            self.metrics_box_color = '#404040'
+        else:
+            sns.set_theme(style="whitegrid")
+            self.bg_color = '#f8f9fa'
+            self.text_color = 'black'
+            self.grid_color = '#e0e0e0'
+            self.metrics_box_color = 'lightgray'
         
         # Create a custom color palette for different metrics
         self.color_palette = {
@@ -198,33 +214,43 @@ class PerformanceVisualizer:
         times = force_data['time'].values
         forces = force_data['bar_force'].values
         
-        # Plot the force line with shaded area
+        # Determine lifting phases using force thresholds
+        mean_force = np.mean(forces) if len(forces) > 0 else 0
+        lifting_mask = forces > mean_force
+        lowering_mask = forces <= mean_force
+        
+        # Plot lifting phase (higher force)
+        if np.any(lifting_mask):
+            ax.fill_between(times, forces, mean_force, where=lifting_mask, 
+                          color=self.color_palette['force'], alpha=0.3,
+                          label='Lifting Phase (↑)')
+        
+        # Plot lowering phase (lower force)
+        if np.any(lowering_mask):
+            ax.fill_between(times, forces, mean_force, where=lowering_mask, 
+                          color=self.color_palette['force'], alpha=0.15,
+                          label='Lowering Phase (↓)')
+        
+        # Plot the force line
         ax.plot(times, forces, color=self.color_palette['force'], 
                linewidth=1.5, label='Applied Force')
-        ax.fill_between(times, forces, 0, color=self.color_palette['force'], alpha=0.2)
         
-        # Add horizontal lines for mean and baseline
+        # Add mean line
         if len(forces) > 0:
-            mean_force = np.mean(forces)
             ax.axhline(y=mean_force, color=self.color_palette['force'], 
-                     linestyle='--', alpha=0.7, linewidth=1, 
-                     label=f'Mean Force: {mean_force:.1f} N')
+                      linestyle='--', alpha=0.7, linewidth=1)
+            ax.text(times[-1], mean_force, f' {mean_force:.1f} N', va='center', fontsize=8,
+                   backgroundcolor='white', alpha=0.7)
         
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Force (N)')
-        ax.set_title('Applied Force Over Time')
+        # Add legend with phase information
+        ax.legend(loc='best', fontsize=8, frameon=True, fancybox=True)
         
-        # Add a nicer legend with smaller font
-        ax.legend(loc='best', frameon=True, fancybox=True, shadow=True, fontsize=8)
-        
-        # Enhance gridlines
+        ax.set_xlabel('Time (s)', fontsize='small')
+        ax.set_ylabel('Force (N)', fontsize='small')
+        ax.set_title('Applied Force', fontsize=10, fontweight='bold')
+        ax.tick_params(axis='both', which='major', labelsize='small')
         ax.grid(True, alpha=0.3, linestyle='-')
-        
-        # Add a light background color
         ax.set_facecolor('#f8f9fa')
-        
-        plt.tight_layout()
-        return fig
     
     def plot_power(self, power_data: pd.DataFrame, fig_width=5, fig_height=3) -> Figure:
         """
@@ -248,19 +274,12 @@ class PerformanceVisualizer:
         times = power_data['time'].values
         powers = power_data['bar_power'].values
         
-        # If velocities DataFrame is included in power_data, use it to determine concentric phase
-        if 'bar_velocity' in power_data.columns:
-            velocities = power_data['bar_velocity'].values
-            concentric_mask = velocities > 0  # Concentric phase = positive velocity
-        else:
-            # Otherwise just use positive power as a proxy for concentric phase
-            concentric_mask = powers > 0
-        
         # Highlight positive power (concentric phase) - most important for performance
-        if np.any(concentric_mask):
-            ax.fill_between(times, powers, 0, where=concentric_mask, 
+        pos_mask = powers > 0
+        if np.any(pos_mask):
+            ax.fill_between(times, powers, 0, where=pos_mask, 
                           color=self.color_palette['power'], alpha=0.3, 
-                          label='Concentric Phase')
+                          label='Concentric Power')
         
         # Plot the power line
         ax.plot(times, powers, color=self.color_palette['power'], 
@@ -269,40 +288,51 @@ class PerformanceVisualizer:
         # Add a horizontal line at y=0
         ax.axhline(y=0, color='gray', linestyle='-', alpha=0.7, linewidth=0.8)
         
-        # Calculate and show mean for concentric phase power only
-        if np.any(concentric_mask):
-            # Only calculate mean for power values during concentric phase
-            concentric_powers = powers[concentric_mask]
-            mean_power = np.mean(concentric_powers)
+        # Calculate and show mean for positive power
+        if np.any(pos_mask):
+            mean_power = np.mean(powers[pos_mask])
             ax.axhline(y=mean_power, color=self.color_palette['power'], 
                      linestyle='--', alpha=0.7, linewidth=1,
                      label=f'Mean Power: {mean_power:.1f} W')
         
         ax.set_xlabel('Time (s)')
         ax.set_ylabel('Power (W)')
-        ax.set_title('Power Output Over Time (Concentric Phase)')
+        ax.set_title('Power Output Over Time')
         
         # Add a nicer legend with smaller font
         ax.legend(loc='best', frameon=True, fancybox=True, shadow=True, fontsize=8)
         
-        # Enhance gridlines
-        ax.grid(True, alpha=0.3, linestyle='-')
+        # Add denser grid with both major and minor lines
+        ax.grid(True, which='major', alpha=0.4, linestyle='-', color=self.grid_color)
+        ax.grid(True, which='minor', alpha=0.2, linestyle=':', color=self.grid_color)
+        ax.minorticks_on()  # Enable minor ticks
         
-        # Add a light background color
+        # Set more granular y-axis ticks
+        if len(powers) > 0:
+            max_power = np.max(np.abs(powers))
+            # Calculate a nice round step size that gives us ~10-20 major ticks
+            step = 10 ** np.floor(np.log10(max_power / 10))  # Start with order of magnitude
+            if max_power / step > 20:
+                step *= 2
+            elif max_power / step < 10:
+                step /= 2
+            
+            major_ticks = np.arange(0, max_power + step, step)
+            minor_ticks = np.arange(0, max_power + step/2, step/2)
+            ax.yaxis.set_major_locator(plt.FixedLocator(major_ticks))
+            ax.yaxis.set_minor_locator(plt.FixedLocator(minor_ticks))
+        
         ax.set_facecolor('#f8f9fa')
         
         plt.tight_layout()
         return fig
     
-    def create_summary_dashboard(self, 
-                               summary_metrics: Dict[str, Any], 
-                               time_series_data: Dict[str, pd.DataFrame],
+    def create_summary_dashboard(self, time_series_data: Dict[str, pd.DataFrame], 
                                fig_width=10, fig_height=8) -> Figure:
         """
-        Create a comprehensive dashboard with summary metrics and key graphs.
+        Create a comprehensive dashboard with key performance graphs.
         
         Args:
-            summary_metrics (Dict[str, Any]): Dictionary of summary metrics
             time_series_data (Dict[str, pd.DataFrame]): Dictionary of time series data
             fig_width (float): Width of the figure in inches
             fig_height (float): Height of the figure in inches
@@ -310,112 +340,118 @@ class PerformanceVisualizer:
         Returns:
             Figure: Matplotlib figure with the dashboard
         """
-        fig = plt.figure(figsize=(fig_width, fig_height), constrained_layout=True)
-        fig.suptitle('Weightlifting Performance Analysis', fontsize=14, fontweight='bold')
+        # Create figure with a more efficient layout
+        fig = plt.figure(figsize=(fig_width, fig_height))
         
-        # Create a grid for the plots
-        gs = fig.add_gridspec(3, 3)
+        # Create a grid with better space utilization
+        gs = fig.add_gridspec(3, 2, height_ratios=[0.15, 1, 1], 
+                            hspace=0.4, wspace=0.3,
+                            left=0.08, right=0.92, 
+                            bottom=0.08, top=0.92)
         
-        # Summary metrics in the top left
-        ax_summary = fig.add_subplot(gs[0, 0])
-        self._plot_enhanced_summary(ax_summary, summary_metrics)
+        fig.suptitle('Weightlifting Performance Analysis', 
+                    fontsize=12, fontweight='bold', y=0.99)
         
-        # Joint angles
-        if 'angles' in time_series_data and not time_series_data['angles'].empty:
-            ax_angles = fig.add_subplot(gs[0, 1:])
-            self._plot_joint_angles_subplot(ax_angles, time_series_data['angles'])
+        # Calculate metrics from time series data
+        metrics = {}
         
-        # Velocity with concentric/eccentric phases
-        if 'velocities' in time_series_data and not time_series_data['velocities'].empty:
-            ax_velocity = fig.add_subplot(gs[1, :])
-            self._plot_velocity_subplot_enhanced(ax_velocity, time_series_data['velocities'])
-        
-        # Force and Power
-        if 'forces' in time_series_data and not time_series_data['forces'].empty:
-            ax_force = fig.add_subplot(gs[2, :2])
-            self._plot_force_subplot_enhanced(ax_force, time_series_data['forces'])
-            
-        if 'powers' in time_series_data and not time_series_data['powers'].empty:
-            ax_power = fig.add_subplot(gs[2, 2])
-            self._plot_power_subplot_enhanced(ax_power, time_series_data['powers'])
-        
-        plt.tight_layout()
-        plt.subplots_adjust(top=0.92, hspace=0.3, wspace=0.3)
-        
-        return fig
-    
-    def _plot_enhanced_summary(self, ax, summary_metrics: Dict[str, Any]):
-        """Helper method to plot summary metrics as text with enhanced styling"""
-        ax.axis('off')
-        
-        # Extract and format metrics
-        rep_count = summary_metrics.get('rep_count', 0)
-        
-        # Concentric (positive) velocity metrics
-        max_vel_pos = summary_metrics.get('max_velocity_pos', 0)
-        avg_vel_pos = summary_metrics.get('avg_velocity_pos', 0)
-        vel_units = summary_metrics.get('max_velocity_pos_units', 'm/s')
-        
-        # Eccentric (negative) velocity metrics
-        max_vel_neg = summary_metrics.get('max_velocity_neg', 0)
-        avg_vel_neg = summary_metrics.get('avg_velocity_neg', 0)
+        # Rep count from velocity data
+        rep_count = 0
+        if 'velocities' in time_series_data:
+            velocity_data = time_series_data['velocities']
+            if 'bar_velocity' in velocity_data.columns:
+                velocities = velocity_data['bar_velocity'].values
+                # Simple rep counting based on zero crossings
+                pos_to_neg = 0
+                for i in range(1, len(velocities)):
+                    if velocities[i-1] >= 0 and velocities[i] < 0:
+                        pos_to_neg += 1
+                rep_count = pos_to_neg
+                
+                # Calculate velocity metrics
+                pos_mask = velocities > 0
+                neg_mask = velocities < 0
+                
+                if np.any(pos_mask):
+                    metrics['avg_velocity'] = np.mean(velocities[pos_mask])
+                    metrics['max_velocity'] = np.max(velocities[pos_mask])
+                else:
+                    metrics['avg_velocity'] = 0
+                    metrics['max_velocity'] = 0
         
         # Force metrics
-        max_force = summary_metrics.get('max_force', 0)
-        avg_force = summary_metrics.get('avg_force', 0)
-        force_units = summary_metrics.get('max_force_units', 'N')
+        if 'forces' in time_series_data:
+            force_data = time_series_data['forces']
+            if 'bar_force' in force_data.columns:
+                forces = force_data['bar_force'].values
+                if len(forces) > 0:
+                    metrics['avg_force'] = np.mean(forces)
+                    metrics['max_force'] = np.max(forces)
+                else:
+                    metrics['avg_force'] = 0
+                    metrics['max_force'] = 0
         
         # Power metrics
-        max_power = summary_metrics.get('max_power', 0)
-        avg_power = summary_metrics.get('avg_power', 0)
-        power_units = summary_metrics.get('max_power_units', 'W')
+        if 'powers' in time_series_data:
+            power_data = time_series_data['powers']
+            if 'bar_power' in power_data.columns:
+                powers = power_data['bar_power'].values
+                pos_mask = powers > 0
+                if np.any(pos_mask):
+                    metrics['avg_power'] = np.mean(powers[pos_mask])
+                    metrics['max_power'] = np.max(powers[pos_mask])
+                else:
+                    metrics['avg_power'] = 0
+                    metrics['max_power'] = 0
         
-        # Create formatted text sections
-        text_sections = [
-            "REPETITIONS\n" + f"{rep_count}",
-            
-            "CONCENTRIC (UP)\n" + 
-            f"Max Velocity: {max_vel_pos:.2f} {vel_units}\n" +
-            f"Avg Velocity: {avg_vel_pos:.2f} {vel_units}",
-            
-            "ECCENTRIC (DOWN)\n" + 
-            f"Max Velocity: {max_vel_neg:.2f} {vel_units}\n" +
-            f"Avg Velocity: {avg_vel_neg:.2f} {vel_units}",
-            
-            "FORCE\n" + 
-            f"Maximum: {max_force:.1f} {force_units}\n" +
-            f"Average: {avg_force:.1f} {force_units}",
-            
-            "POWER\n" + 
-            f"Maximum: {max_power:.1f} {power_units}\n" +
-            f"Average: {avg_power:.1f} {power_units}"
+        # Create a row for metrics at the top spanning both columns
+        metrics_ax = fig.add_subplot(gs[0, :])
+        metrics_ax.axis('off')
+        
+        # Format metrics text with improved spacing
+        metrics_boxes = [
+            {'text': f"Repetitions\n{rep_count}", 'x': 0.125},
+            {'text': f"Velocity\nMax: {metrics.get('max_velocity', 0):.2f} m/s\nAvg: {metrics.get('avg_velocity', 0):.2f} m/s", 'x': 0.375},
+            {'text': f"Force\nMax: {metrics.get('max_force', 0):.1f} N\nAvg: {metrics.get('avg_force', 0):.1f} N", 'x': 0.625},
+            {'text': f"Power\nMax: {metrics.get('max_power', 0):.1f} W\nAvg: {metrics.get('avg_power', 0):.1f} W", 'x': 0.875}
         ]
         
-        # Define vertical positions for each section
-        y_positions = [0.9, 0.7, 0.5, 0.3, 0.1]
+        for box in metrics_boxes:
+            metrics_ax.text(box['x'], 0.5, box['text'],
+                          ha='center', va='center', fontsize=10, fontweight='bold',
+                          color=self.text_color,
+                          bbox=dict(facecolor=self.metrics_box_color, 
+                                  alpha=0.5, 
+                                  boxstyle='round,pad=0.6',
+                                  edgecolor=self.grid_color))
+
+        # Add vertical separators
+        for x in [0.25, 0.50, 0.75]:
+            metrics_ax.axvline(x=x, color=self.grid_color, 
+                             linestyle=':', alpha=0.5, linewidth=1)
+
+        # Create subplots with maximized space
+        if 'angles' in time_series_data and not time_series_data['angles'].empty:
+            ax_angles = fig.add_subplot(gs[1, 0])
+            self._plot_joint_angles_subplot(ax_angles, time_series_data['angles'])
+            ax_angles.set_position(ax_angles.get_position().expanded(1.1, 1.1))
         
-        # Plot each section with custom styling
-        for i, (text, y_pos) in enumerate(zip(text_sections, y_positions)):
-            # Extract the header (first line)
-            lines = text.split('\n')
-            header = lines[0]
-            content = '\n'.join(lines[1:]) if len(lines) > 1 else ""
-            
-            # Draw header in bold
-            ax.text(0.05, y_pos, header, transform=ax.transAxes, fontsize=9,
-                   fontweight='bold', verticalalignment='top')
-            
-            # Draw content in normal font
-            if content:
-                ax.text(0.05, y_pos-0.05, content, transform=ax.transAxes, fontsize=9,
-                       verticalalignment='top')
+        if 'velocities' in time_series_data and not time_series_data['velocities'].empty:
+            ax_velocity = fig.add_subplot(gs[1, 1])
+            self._plot_velocity_subplot_enhanced(ax_velocity, time_series_data['velocities'])
+            ax_velocity.set_position(ax_velocity.get_position().expanded(1.1, 1.1))
         
-        # Add a frame around the summary
-        ax.set_frame_on(True)
-        ax.patch.set_edgecolor('lightgray')
-        ax.patch.set_facecolor('#f9f9f9')
-        ax.patch.set_linewidth(1)
-        ax.set_title('Performance Summary', fontweight='bold', fontsize=10)
+        if 'forces' in time_series_data and not time_series_data['forces'].empty:
+            ax_force = fig.add_subplot(gs[2, 0])
+            self._plot_force_subplot_enhanced(ax_force, time_series_data['forces'])
+            ax_force.set_position(ax_force.get_position().expanded(1.1, 1.1))
+            
+        if 'powers' in time_series_data and not time_series_data['powers'].empty:
+            ax_power = fig.add_subplot(gs[2, 1])
+            self._plot_power_subplot_enhanced(ax_power, time_series_data['powers'])
+            ax_power.set_position(ax_power.get_position().expanded(1.1, 1.1))
+        
+        return fig
     
     def _plot_joint_angles_subplot(self, ax, angle_data: pd.DataFrame):
         """Helper method to plot joint angles on a subplot"""
@@ -475,21 +511,21 @@ class PerformanceVisualizer:
             pos_mean = np.mean(velocities[pos_mask])
             ax.axhline(y=pos_mean, color=self.color_palette['velocity_pos'], 
                       linestyle='--', alpha=0.7, linewidth=1)
-            ax.text(times[-1], pos_mean, f' {pos_mean:.2f}', va='center', fontsize=8,
+            ax.text(times[-1], pos_mean, f'd {pos_mean:.2f}', va='center', fontsize=8,
                    backgroundcolor='white', alpha=0.7)
         
         if np.any(neg_mask):
             neg_mean = np.mean(velocities[neg_mask])
             ax.axhline(y=neg_mean, color=self.color_palette['velocity_neg'], 
                       linestyle='--', alpha=0.7, linewidth=1)
-            ax.text(times[-1], neg_mean, f' {neg_mean:.2f}', va='center', fontsize=8,
+            ax.text(times[-1], neg_mean, f'n {neg_mean:.2f}', va='center', fontsize=8,
                    backgroundcolor='white', alpha=0.7)
         
         # Add legend with phase information
         legend_elements = [
             plt.Line2D([0], [0], color=self.color_palette['velocity'], lw=1.5, label='Bar Velocity'),
-            plt.Rectangle((0, 0), 1, 1, fc=self.color_palette['velocity_pos'], alpha=0.3, label='Concentric (Up)'),
-            plt.Rectangle((0, 0), 1, 1, fc=self.color_palette['velocity_neg'], alpha=0.3, label='Eccentric (Down)')
+            plt.Rectangle((0, 0), 1, 1, fc=self.color_palette['velocity_pos'], alpha=0.3, label='Concentric (↑)'),
+            plt.Rectangle((0, 0), 1, 1, fc=self.color_palette['velocity_neg'], alpha=0.3, label='Eccentric (↓)'),
         ]
         
         ax.legend(handles=legend_elements, loc='best', fontsize=8, frameon=True, fancybox=True)
@@ -515,18 +551,36 @@ class PerformanceVisualizer:
         times = force_data['time'].values
         forces = force_data['bar_force'].values
         
-        # Plot the force line with shaded area
+        # Determine lifting phases using force thresholds
+        mean_force = np.mean(forces) if len(forces) > 0 else 0
+        lifting_mask = forces > mean_force
+        lowering_mask = forces <= mean_force
+        
+        # Plot lifting phase (higher force)
+        if np.any(lifting_mask):
+            ax.fill_between(times, forces, mean_force, where=lifting_mask, 
+                          color=self.color_palette['force'], alpha=0.3,
+                          label='Lifting Phase (↑)')
+        
+        # Plot lowering phase (lower force)
+        if np.any(lowering_mask):
+            ax.fill_between(times, forces, mean_force, where=lowering_mask, 
+                          color=self.color_palette['force'], alpha=0.15,
+                          label='Lowering Phase (↓)')
+        
+        # Plot the force line
         ax.plot(times, forces, color=self.color_palette['force'], 
-               linewidth=1.5, label='Force')
-        ax.fill_between(times, forces, 0, color=self.color_palette['force'], alpha=0.2)
+               linewidth=1.5, label='Applied Force')
         
         # Add mean line
         if len(forces) > 0:
-            mean_force = np.mean(forces)
             ax.axhline(y=mean_force, color=self.color_palette['force'], 
                       linestyle='--', alpha=0.7, linewidth=1)
-            ax.text(times[-1], mean_force, f' {mean_force:.1f}', va='center', fontsize=8,
+            ax.text(times[-1], mean_force, f' {mean_force:.1f} N', va='center', fontsize=8,
                    backgroundcolor='white', alpha=0.7)
+        
+        # Add legend with phase information
+        ax.legend(loc='best', fontsize=8, frameon=True, fancybox=True)
         
         ax.set_xlabel('Time (s)', fontsize='small')
         ax.set_ylabel('Force (N)', fontsize='small')
@@ -544,40 +598,68 @@ class PerformanceVisualizer:
         times = power_data['time'].values
         powers = power_data['bar_power'].values
         
-        # Check if we have velocity data to determine concentric phase
-        concentric_mask = None
-        if 'bar_velocity' in power_data.columns:
-            velocities = power_data['bar_velocity'].values
-            concentric_mask = velocities > 0
-        else:
-            # Fall back to positive power as proxy for concentric phase
-            concentric_mask = powers > 0
+        # Highlight positive power (concentric phase)
+        pos_mask = powers > 0
+        neg_mask = powers <= 0
         
-        # Highlight concentric phase (positive velocity)
-        if np.any(concentric_mask):
-            ax.fill_between(times, powers, 0, where=concentric_mask, 
-                          color=self.color_palette['power'], alpha=0.3)
+        # Plot concentric phase (positive power)
+        if np.any(pos_mask):
+            ax.fill_between(times, powers, 0, where=pos_mask, 
+                          color=self.color_palette['power'], alpha=0.3,
+                          label='Concentric Phase (↑)')
+            # Calculate mean only for concentric phase
+            pos_mean = np.mean(powers[pos_mask])
+        else:
+            pos_mean = 0
+        
+        # Plot eccentric phase (negative power)
+        if np.any(neg_mask):
+            ax.fill_between(times, powers, 0, where=neg_mask, 
+                          color=self.color_palette['power'], alpha=0.15,
+                          label='Eccentric Phase (↓)')
         
         # Plot the power line
-        ax.plot(times, powers, color=self.color_palette['power'], linewidth=1.5, label='Power')
+        ax.plot(times, powers, color=self.color_palette['power'], linewidth=1.5, 
+               label='Power Output')
         
         # Add a horizontal line at y=0
         ax.axhline(y=0, color='gray', linestyle='-', alpha=0.7, linewidth=0.8)
         
-        # Calculate and add mean line for concentric phase power
-        if np.any(concentric_mask):
-            concentric_powers = powers[concentric_mask]
-            pos_mean = np.mean(concentric_powers)
+        # Add mean line for concentric phase only
+        if pos_mean > 0:
             ax.axhline(y=pos_mean, color=self.color_palette['power'], 
                       linestyle='--', alpha=0.7, linewidth=1)
-            ax.text(times[-1], pos_mean, f' {pos_mean:.1f}', va='center', fontsize=8,
+            ax.text(times[-1], pos_mean, f' {pos_mean:.1f} W', va='center', fontsize=8,
                    backgroundcolor='white', alpha=0.7)
+        
+        # Add legend with phase information
+        ax.legend(loc='best', fontsize=8, frameon=True, fancybox=True)
         
         ax.set_xlabel('Time (s)', fontsize='small')
         ax.set_ylabel('Power (W)', fontsize='small')
-        ax.set_title('Power Output (Concentric Phase)', fontsize=10, fontweight='bold')
+        ax.set_title('Power Output', fontsize=10, fontweight='bold')
         ax.tick_params(axis='both', which='major', labelsize='small')
-        ax.grid(True, alpha=0.3, linestyle='-')
+        
+        # Add denser grid with both major and minor lines
+        ax.grid(True, which='major', alpha=0.4, linestyle='-', color=self.grid_color)
+        ax.grid(True, which='minor', alpha=0.2, linestyle=':', color=self.grid_color)
+        ax.minorticks_on()  # Enable minor ticks
+        
+        # Set more granular y-axis ticks
+        if len(powers) > 0:
+            max_power = np.max(np.abs(powers))
+            # Calculate a nice round step size that gives us ~10-20 major ticks
+            step = 10 ** np.floor(np.log10(max_power / 10))  # Start with order of magnitude
+            if max_power / step > 20:
+                step *= 2
+            elif max_power / step < 10:
+                step /= 2
+            
+            major_ticks = np.arange(0, max_power + step, step)
+            minor_ticks = np.arange(0, max_power + step/2, step/2)
+            ax.yaxis.set_major_locator(plt.FixedLocator(major_ticks))
+            ax.yaxis.set_minor_locator(plt.FixedLocator(minor_ticks))
+        
         ax.set_facecolor('#f8f9fa')
     
     def save_figure_to_buffer(self, fig: Figure, format: str = 'png', dpi: int = 100) -> bytes:

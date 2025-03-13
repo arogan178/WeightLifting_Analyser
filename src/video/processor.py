@@ -33,7 +33,15 @@ class VideoProcessor:
         
         Returns:
             Dict[str, Any]: Video metadata including dimensions, FPS, and frame count
+        
+        Raises:
+            ValueError: If video file cannot be opened
         """
+        # Release any existing capture
+        if self.cap is not None:
+            self.cap.release()
+            
+        # Open video file
         self.cap = cv2.VideoCapture(self.video_path)
         
         if not self.cap.isOpened():
@@ -44,6 +52,14 @@ class VideoProcessor:
         self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Validate video properties
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("Invalid video dimensions")
+        if self.fps <= 0:
+            raise ValueError("Invalid frame rate")
+        if self.frame_count <= 0:
+            raise ValueError("Video appears to be empty")
         
         self.video_metadata = {
             'width': self.width,
@@ -83,14 +99,24 @@ class VideoProcessor:
         
         Yields:
             Tuple[int, np.ndarray]: Frame number and the frame image
+        
+        Raises:
+            RuntimeError: If video is not loaded
+            StopIteration: When all frames are processed
         """
         if self.cap is None or not self.cap.isOpened():
-            self.load_video()
+            raise RuntimeError("Video not loaded. Call load_video() first.")
             
         frame_num = 0
+        frames_read = 0
         
         while True:
+            # Check if we've reached the end
+            if frames_read >= self.frame_count:
+                break
+                
             ret, frame = self.cap.read()
+            frames_read += 1
             
             if not ret:
                 break
@@ -99,6 +125,9 @@ class VideoProcessor:
                 yield frame_num, frame
                 
             frame_num += 1
+            
+        # Always release at the end
+        self.release()
             
     def resize_frame(self, frame: np.ndarray, target_width: int = 640) -> np.ndarray:
         """
@@ -111,8 +140,11 @@ class VideoProcessor:
         Returns:
             np.ndarray: Resized frame
         """
+        if frame is None:
+            return None
+            
         h, w = frame.shape[:2]
-        ratio = target_width / w
+        ratio = target_width / float(w)
         target_height = int(h * ratio)
         
         return cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)

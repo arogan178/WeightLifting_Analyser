@@ -423,7 +423,7 @@ class PerformanceCalculator:
         rep_velocities_pos = []  # Positive velocities (concentric phase)
         rep_velocities_neg = []  # Negative velocities (eccentric phase)
         rep_forces = []
-        rep_powers = []
+        rep_powers_concentric = []  # Only collect powers during concentric phase
 
         for start_idx, end_idx in segments:
             # Velocity calculations per rep, separated by direction
@@ -459,15 +459,17 @@ class PerformanceCalculator:
                 # Only consider power during concentric phase (positive velocity)
                 concentric_powers = [p for v, p in vel_power_pairs if v > 0]
                 if concentric_powers:
-                    rep_powers.append(np.mean(concentric_powers))
+                    rep_powers_concentric.append(np.mean(concentric_powers))
 
         # Calculate velocity metrics - separate positive and negative
         summary['avg_velocity_pos'] = np.mean(rep_velocities_pos) if rep_velocities_pos else 0
         summary['avg_velocity_neg'] = np.mean(rep_velocities_neg) if rep_velocities_neg else 0
         
-        # Calculate force and power averages
+        # Calculate force average
         summary['avg_force'] = np.mean(rep_forces) if rep_forces else 0
-        summary['avg_power'] = np.mean(rep_powers) if rep_powers else 0
+        
+        # Calculate power average - only for concentric phase
+        summary['avg_power'] = np.mean(rep_powers_concentric) if rep_powers_concentric else 0
         
         # Calculate maximums from entire series
         if 'bar_velocity' in self.velocity_series and self.velocity_series['bar_velocity']:
@@ -516,6 +518,89 @@ class PerformanceCalculator:
         summary['max_power_units'] = 'W'
         
         return summary
+    
+    def calculate_dashboard_metrics(self, time_series_data: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
+        """
+        Calculate metrics for dashboard display from time series data.
+        
+        Args:
+            time_series_data (Dict[str, pd.DataFrame]): Dictionary of time series data
+            
+        Returns:
+            Dict[str, Any]: Dictionary of calculated metrics
+        """
+        metrics = {}
+        
+        # Rep count from velocity data
+        rep_count = 0
+        if 'velocities' in time_series_data:
+            velocity_data = time_series_data['velocities']
+            if 'bar_velocity' in velocity_data.columns:
+                velocities = velocity_data['bar_velocity'].values
+                # Simple rep counting based on zero crossings
+                pos_to_neg = 0
+                for i in range(1, len(velocities)):
+                    if velocities[i-1] >= 0 and velocities[i] < 0:
+                        pos_to_neg += 1
+                rep_count = pos_to_neg
+                
+                # Calculate velocity metrics
+                pos_mask = velocities > 0
+                neg_mask = velocities < 0
+                
+                if np.any(pos_mask):
+                    metrics['avg_velocity'] = np.mean(velocities[pos_mask])
+                    metrics['max_velocity'] = np.max(velocities[pos_mask])
+                else:
+                    metrics['avg_velocity'] = 0
+                    metrics['max_velocity'] = 0
+        
+        # Force metrics
+        if 'forces' in time_series_data:
+            force_data = time_series_data['forces']
+            if 'bar_force' in force_data.columns:
+                forces = force_data['bar_force'].values
+                if len(forces) > 0:
+                    metrics['avg_force'] = np.mean(forces)
+                    metrics['max_force'] = np.max(forces)
+                else:
+                    metrics['avg_force'] = 0
+                    metrics['max_force'] = 0
+        
+        # Power metrics - only calculate for concentric phase
+        if 'powers' in time_series_data and 'velocities' in time_series_data:
+            power_data = time_series_data['powers']
+            velocity_data = time_series_data['velocities']
+            
+            if 'bar_power' in power_data.columns and 'bar_velocity' in velocity_data.columns:
+                # Get common timestamps
+                power_dict = dict(zip(power_data['time'], power_data['bar_power']))
+                velocity_dict = dict(zip(velocity_data['time'], velocity_data['bar_velocity']))
+                
+                common_times = set(power_dict.keys()).intersection(velocity_dict.keys())
+                
+                # Only include power during concentric (positive velocity) phase
+                concentric_powers = [power_dict[t] for t in common_times 
+                                   if t in velocity_dict and velocity_dict[t] > 0]
+                
+                if concentric_powers:
+                    metrics['avg_power'] = np.mean(concentric_powers)
+                    metrics['max_power'] = np.max(concentric_powers)
+                else:
+                    metrics['avg_power'] = 0
+                    metrics['max_power'] = 0
+        
+        metrics['rep_count'] = rep_count
+        
+        # Add units
+        metrics['avg_velocity_units'] = 'm/s'
+        metrics['max_velocity_units'] = 'm/s'
+        metrics['avg_force_units'] = 'N'
+        metrics['max_force_units'] = 'N'
+        metrics['avg_power_units'] = 'W'
+        metrics['max_power_units'] = 'W'
+        
+        return metrics
     
     def get_time_series_data(self) -> Dict[str, pd.DataFrame]:
         """
