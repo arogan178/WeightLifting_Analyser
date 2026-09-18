@@ -21,7 +21,7 @@ setup(
         ],
     },
     author="Andrea Bugeja",
-    author_email="andrea.bugeja@hotmail.com",
+    author_email="contact@andreabugeja.me",
     description="A Python application that processes weightlifting videos to automatically analyze and provide performance metrics",
     long_description=open('README.md').read(),
     long_description_content_type="text/markdown",
